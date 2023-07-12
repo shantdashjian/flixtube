@@ -1,50 +1,64 @@
 const express = require("express");
-const http = require("http");
-const mongodb = require("mongodb");
+const fs = require("fs");
+const amqp = require('amqplib');
 
-const app = express();
+if (!process.env.PORT) {
+    throw new Error("Please specify the port number for the HTTP server with the environment variable PORT.");
+}
+
+if (!process.env.RABBIT) {
+    throw new Error("Please specify the name of the RabbitMQ host using environment variable RABBIT");
+}
+
 const PORT = process.env.PORT;
-const VIDEO_STORAGE_HOST = process.env.VIDEO_STORAGE_HOST;
-const VIDEO_STORAGE_PORT = parseInt(process.env.VIDEO_STORAGE_PORT);
-const DBHOST = process.env.DBHOST;
-const DBNAME = process.env.DBNAME;
+const RABBIT = process.env.RABBIT;
 
+//
+// Send the "viewed" to the history microservice.
+//
+function sendViewedMessage(messageChannel, videoPath) {
+    console.log(`Publishing message on "viewed" exchange.`);
+        
+    const msg = { videoPath: videoPath };
+    const jsonMsg = JSON.stringify(msg);
+    messageChannel.publish("viewed", "", Buffer.from(jsonMsg)); // Publish message to the "viewed" exchange.
+}
+
+//
+// Application entry point.
+//
 async function main() {
-  const client = await mongodb.MongoClient.connect(DBHOST);
-  const db = client.db(DBNAME);
-  const videosCollection = db.collection("videos");
-  app.get("/video", async (req, res) => {
-    const videoId = new mongodb.ObjectId(req.query.id);
-    const videoRecord = await videosCollection.findOne({ _id: videoId });
-    if (!videoRecord) {
-      res.sendStatus(404);
-      return;
-    }
-    const forwardRequest = http.request(
-      {
-        host: VIDEO_STORAGE_HOST,
-        port: VIDEO_STORAGE_PORT,
-        path: `/video?path=${videoRecord.videoPath}`,
-        method: 'GET',
-        headers: req.headers
-      },
-      forwardResponse => {
-        res.writeHeader(forwardResponse.statusCode, forwardResponse.headers);
-        forwardResponse.pipe(res);
-      }
-    );
-    req.pipe(forwardRequest);
-  });
-  //
-  // Starts the HTTP server.
-  //
-  app.listen(PORT, () => {
-    console.log(`Microservice listening, please load the data file db-fixture/videos.json into your database before testing this microservice.`);
-  });
+
+    const messagingConnection = await amqp.connect(RABBIT); // Connect to the RabbitMQ server.
+
+    const messageChannel = await messagingConnection.createChannel(); // Create a RabbitMQ messaging channel.
+
+	await messageChannel.assertExchange("viewed", "fanout"); // Assert that we have a "viewed" exchange.
+
+    const app = express();
+
+    app.get("/video", async (req, res) => { // Route for streaming video.
+
+        const videoPath = "./videos/SampleVideo_1280x720_1mb.mp4";
+        const stats = await fs.promises.stat(videoPath);
+
+        res.writeHead(200, {
+            "Content-Length": stats.size,
+            "Content-Type": "video/mp4",
+        });
+    
+        fs.createReadStream(videoPath).pipe(res);
+
+        sendViewedMessage(messageChannel, videoPath); // Send message to "history" microservice that this video has been "viewed".
+    });
+
+    app.listen(PORT, () => {
+        console.log("Microservice online.")
+    });
 }
 
 main()
-  .catch(err => {
-    console.error("Microservice failed to start.");
-    console.error(err && err.stack || err);
-  });
+    .catch(err => {
+        console.error("Microservice failed to start.");
+        console.error(err && err.stack || err);
+    });
