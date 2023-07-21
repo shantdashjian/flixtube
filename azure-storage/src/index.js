@@ -1,8 +1,6 @@
 const express = require("express");
 const { BlobServiceClient, StorageSharedKeyCredential } = require("@azure/storage-blob");
 
-const app = express();
-
 //
 // Throws an error if the any required environment variables are missing.
 //
@@ -26,8 +24,9 @@ if (!process.env.STORAGE_ACCESS_KEY) {
 const PORT = process.env.PORT;
 const STORAGE_ACCOUNT_NAME = process.env.STORAGE_ACCOUNT_NAME;
 const STORAGE_ACCESS_KEY = process.env.STORAGE_ACCESS_KEY;
+const STORAGE_CONTAINER_NAME = "videos";
 
-console.log(`Serving videos from Azure storage account ${STORAGE_ACCOUNT_NAME}.`);
+console.log(`Serving videos from Azure storage account ${STORAGE_ACCOUNT_NAME}/${STORAGE_CONTAINER_NAME}.`);
 
 //
 // Create the Blob service API to communicate with Azure storage.
@@ -41,20 +40,18 @@ function createBlobService() {
     return blobService;
 }
 
+const app = express();
+
 //
 // Registers a HTTP GET route to retrieve videos from storage.
 //
 app.get("/video", async (req, res) => {
 
-    const videoPath = req.query.path;
-    console.log(`Streaming video from path ${videoPath}.`);
-    
+    const videoId = req.query.id;
+
     const blobService = createBlobService();
-
-    const containerName = "videos";
-    const containerClient = blobService.getContainerClient(containerName);
-    const blobClient = containerClient.getBlobClient(videoPath);
-
+    const containerClient = blobService.getContainerClient(STORAGE_CONTAINER_NAME);
+    const blobClient = containerClient.getBlobClient(videoId);
     const properties = await blobClient.getProperties();
 
     //
@@ -67,6 +64,27 @@ app.get("/video", async (req, res) => {
 
     const response = await blobClient.download();
     response.readableStreamBody.pipe(res);
+});
+
+//
+// HTTP POST route to upload a video to Azure storage.
+//
+app.post("/upload", async (req, res) => {
+
+    const videoId = req.headers.id;
+    const contentType = req.headers["content-type"];
+
+    const blobService = createBlobService();
+
+    const containerClient = blobService.getContainerClient(STORAGE_CONTAINER_NAME); 
+    await containerClient.createIfNotExists(); // Creates the container if it doesn't already exist.
+
+    const blockBlobClient = containerClient.getBlockBlobClient(videoId);
+    await blockBlobClient.uploadStream(req);
+    await blockBlobClient.setHTTPHeaders({
+        blobContentType: contentType,
+    });
+    res.sendStatus(200);
 });
 
 //

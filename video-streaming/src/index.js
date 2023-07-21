@@ -1,6 +1,6 @@
 const express = require("express");
-const fs = require("fs");
 const amqp = require('amqplib');
+const axios = require("axios");
 
 if (!process.env.PORT) {
     throw new Error("Please specify the port number for the HTTP server with the environment variable PORT.");
@@ -14,46 +14,44 @@ const PORT = process.env.PORT;
 const RABBIT = process.env.RABBIT;
 
 //
-// Send the "viewed" to the history microservice.
-//
-function sendViewedMessage(messageChannel, videoPath) {
-    console.log(`Publishing message on "viewed" exchange.`);
-        
-    const msg = { videoPath: videoPath };
-    const jsonMsg = JSON.stringify(msg);
-    messageChannel.publish("viewed", "", Buffer.from(jsonMsg)); // Publish message to the "viewed" exchange.
-}
-
-//
 // Application entry point.
 //
 async function main() {
+    const connection = await amqp.connect(RABBIT); // Connects to the RabbitMQ server.
+    
+    const messageChannel = await connection.createChannel(); // Creates a RabbitMQ messaging channel.
+    
+    await messageChannel.assertExchange("viewed", "fanout"); // Asserts that we have a "viewed" exchange.
 
-    const messagingConnection = await amqp.connect(RABBIT); // Connect to the RabbitMQ server.
-
-    const messageChannel = await messagingConnection.createChannel(); // Create a RabbitMQ messaging channel.
-
-	await messageChannel.assertExchange("viewed", "fanout"); // Assert that we have a "viewed" exchange.
+    //
+    // Broadcasts the "viewed" message to other microservices.
+    //
+    function broadcastViewedMessage(messageChannel, videoId) {
+        console.log(`Publishing message on "viewed" exchange.`);
+            
+        const msg = { video: { id: videoId } };
+        const jsonMsg = JSON.stringify(msg);
+        messageChannel.publish("viewed", "", Buffer.from(jsonMsg)); // Publishes message to the "viewed" exchange.
+    }
 
     const app = express();
 
     app.get("/video", async (req, res) => { // Route for streaming video.
 
-        const videoPath = "./videos/SampleVideo_1280x720_1mb.mp4";
-        const stats = await fs.promises.stat(videoPath);
-
-        res.writeHead(200, {
-            "Content-Length": stats.size,
-            "Content-Type": "video/mp4",
+        const videoId = req.query.id;
+        const response = await axios({ // Forwards the request to the video-storage microservice.
+            method: "GET",
+            url: `http://video-storage/video?id=${videoId}`, 
+            data: req, 
+            responseType: "stream",
         });
-    
-        fs.createReadStream(videoPath).pipe(res);
+        response.data.pipe(res);
 
-        sendViewedMessage(messageChannel, videoPath); // Send message to "history" microservice that this video has been "viewed".
+        broadcastViewedMessage(messageChannel, videoId); // Sends the "viewed" message to indicate this video has been watched.
     });
 
-    app.listen(PORT, () => {
-        console.log("Microservice online.")
+    app.listen(PORT, () => { // Starts the HTTP server.
+        console.log("Microservice online.");
     });
 }
 
